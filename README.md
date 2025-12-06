@@ -6,7 +6,7 @@ This project builds a small ETL pipeline that ingests MovieLens CSVs (`movies.cs
 ## Repo structure
 
 ## step-1
-git clone https://github.com/Ravitejagandluri/movie-pipeline.git
+git clone https://github.com/KrishnaVeni31/Movie-Pipeline.git
 cd movie-pipeline
 
 ## step-2
@@ -34,4 +34,5 @@ movie-pipeline/
 ├── .env
 ├── requirements.txt
 └── movies.db (generated automatically after running etl.py)
+
 
