@@ -6,7 +6,7 @@ A simple data pipeline that loads MovieLens data, enriches it using the OMDb API
 
 1️⃣ Introduction
 2️⃣ How the System Works
-3️⃣ Architecture Diagram
+3️⃣ Data Flow Diagram
 4️⃣ Installation
 5️⃣ Configuration
 6️⃣ Running the Pipeline
@@ -30,7 +30,7 @@ The system does 5 main things:
 🔹 Analyze – Runs SQL queries to show insights
 
 
- 🟧 3️⃣ Architecture Diagram (Visual)
+ 🟧 3️⃣ Data Flow Diagram 
    
    MovieLens CSVs
   movies.csv
