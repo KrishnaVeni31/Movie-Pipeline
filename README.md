@@ -46,16 +46,16 @@ run_queries.py
 (Insights)
 
 5. Installation
- • Follow these steps:
-1. Download the Project
+   Follow these steps:
+ •  Download the Project
 git clone https://github.com/KrishnaVeni31/Movie-Pipeline.git
 cd movie-pipeline
 
-2. Create a Virtual Environment
+ • Create a Virtual Environment
 python -m venv venv
 venv\Scripts\activate     # Windows
 
-3. Install Dependencies
+ • Install Dependencies
 pip install -r requirements.txt
 
 5. Configuration
@@ -66,13 +66,13 @@ OMDB_API_KEY=your_api_key_here
 
 6. Running the Pipeline
 Run the scripts in this order:
-1. Load MovieLens Data
+ •  Load MovieLens Data
 python etl.py
 
-2. Fetch OMDb Metadata
+ •  Fetch OMDb Metadata
 python enrich_missing.py
 
-3. Run SQL Queries
+ • Run SQL Queries
 python run_queries.py
  • These scripts will build the database, enrich it, and display analysis results.
 
