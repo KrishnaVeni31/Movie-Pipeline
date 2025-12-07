@@ -122,7 +122,7 @@ movie-pipeline/
 
 🧾 8️⃣ Outputs
 
-After running the pipeline, you will get:
+After running the pipeline, you will get: 
 
 ✅  movies.db — The complete movie database
 
