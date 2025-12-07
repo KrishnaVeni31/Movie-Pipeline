@@ -24,7 +24,7 @@ pip install -r requirements.txt
 - Open .env file
 - Add your key:
 OMDB_API_KEY=your_api_key_here
-To Verify = echo $env:OMDB_API_KEY
+- To Verify = echo $env:OMDB_API_KEY
 
 ### 5. Run the pipeline
 Run these scripts in order:
