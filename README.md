@@ -1,12 +1,12 @@
+
 # Movie Pipeline — MovieLens + OMDb ETL
 
 A simple data pipeline that loads MovieLens data, enriches it using the OMDb API, and stores everything in an SQLite database for analysis.
 
 
 # Steps to Run the Project
-1. Clone the repository
+### 1. Clone the repository
 git clone https://github.com/KrishnaVeni31/Movie-Pipeline.git
-
 cd movie-pipeline
 
 ### 2. Set up Python environment
@@ -46,4 +46,3 @@ Run these scripts in order:
 - Adds director, plot, box office, runtime, etc. using OMDb
 - Saves everything in movies.db for analysis
 - Easy to query and explore movie data
-
