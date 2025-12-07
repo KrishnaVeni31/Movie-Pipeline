@@ -1,97 +1,48 @@
-Movie Pipeline — MovieLens + OMDb ETL
+# Movie Pipeline — MovieLens + OMDb ETL
 
 A simple data pipeline that loads MovieLens data, enriches it using the OMDb API, and stores everything in an SQLite database for analysis.
 
-Table of Contents 
-1.Introduction
-2.How the System Works
-3.Data Flow Diagram
-4.Installation
-5.Configuration
-6.Running the Pipeline
-7.Project Structure
-8.Outputs
 
-1. Introduction
-The Movie Pipeline reads MovieLens data, adds extra movie details from the OMDb API, and saves everything in an SQLite database.
-This documentation explains how to set up and run the full pipeline.
-
-2. How the System Works (Simple Explanation)
-The system performs the following steps:
- • Extract – Reads MovieLens CSV files
- • Transform – Cleans and prepares the data
- • Enrich – Fetches additional movie details from the OMDb API
- • Load – Stores all processed data into movies.db
- • Analyze – Runs SQL queries to generate insights
-
-4. Data Flow Diagram
-MovieLens CSVs
-movies.csv
-ratings.csv
-      |
-      v
-   etl.py
-(Clean + Load)
-      |
-      v
-enrich_missing.py ----> OMDb API
-(Add Metadata)
-      |
-      v
- movies.db
-(Final Database)
-      |
-      v
-run_queries.py
-(Insights)
-
-5. Installation
-   Follow these steps:
- •  Download the Project
-git clone https://github.com/KrishnaVeni31/Movie-Pipeline.git
+# Steps to Run the Project
+1. Clone the repository
+git clone https://github.com/Ravitejagandluri/movie-pipeline.git
 cd movie-pipeline
 
- • Create a Virtual Environment
+### 2. Set up Python environment
 python -m venv venv
-venv\Scripts\activate     # Windows
 
- • Install Dependencies
+### Activate the environment:
+- Windows: venv\Scripts\activate
+- Mac/Linux: source venv/bin/activate
+
+### 3. Install dependencies
 pip install -r requirements.txt
 
-5. Configuration
-The pipeline requires an OMDb API key.
- • Add your API key inside the .env file:
+### 4. Add your OMDb API key
+- Open .env file
+- Add your key:
 OMDB_API_KEY=your_api_key_here
- • This key is used to fetch additional movie details such as director, plot, runtime, box office, and release date.
 
-6. Running the Pipeline
-Run the scripts in this order:
- •  Load MovieLens Data
-python etl.py
+### 5. Run the pipeline
+Run these scripts in order:
+1. python etl.py → Load MovieLens data into SQLite
+2. python enrich_missing.py → Add extra movie details from OMDb API
+3. python run_queries.py → Run some example queries
 
- •  Fetch OMDb Metadata
-python enrich_missing.py
+## Project Structure
+### Movie-Pipeline
+- etl.py → Loads CSV data into the database
+- enrich_missing.py → Adds extra movie details from OMDb
+- run_queries.py → Runs SQL queries and shows results
+- schema.sql → Defines database tables
+- queries.sql → Contains SQL queries used in the project
+- .env → Keeps your OMDb API key
+- requirements.txt → List of required Python packages
+- movies.db → The database created after running the ETL
 
- • Run SQL Queries
-python run_queries.py
- • These scripts will build the database, enrich it, and display analysis results.
-
-7. Project Structure
-movie-pipeline/
-│
-├── etl.py               - ETL process
-├── enrich_missing.py    - Fetch OMDb metadata
-├── run_queries.py       - Run SQL insights
-├── schema.sql           - Database schema
-├── queries.sql          - Analysis queries
-├── requirements.txt     - Python dependencies
-├── .env                 - API key
-└── movies.db            - Final generated database
-
-8. Outputs
-After running the entire pipeline, you will have:
- • A complete SQLite database (movies.db)
- • Enriched movie details including director, plot, runtime, box office, and release date
- • SQL query results printed in the terminal
- • A fully working ETL process that integrates with the OMDb API
+## Summary
+- Reads movie data from CSVs
+- Adds director, plot, box office, runtime, etc. using OMDb
+- Saves everything in movies.db for analysis
+- Easy to query and explore movie data
 
