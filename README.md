@@ -7,6 +7,7 @@ A simple data pipeline that loads MovieLens data, enriches it using the OMDb API
 # Steps to Run the Project
 ### 1. Clone the repository
 git clone https://github.com/KrishnaVeni31/Movie-Pipeline.git
+
 cd movie-pipeline
 
 ### 2. Set up Python environment
