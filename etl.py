@@ -1,16 +1,19 @@
-# etl.py
 """
-Final ETL script for MovieLens + OMDb enrichment.
+Optimized and fixed ETL for MovieLens + OMDb enrichment.
 
-Improvements included:
-- Robust OMDb requests with short timeouts, rate-limit detection
-- Caching of OMDb responses to omdb_cache.json
-- --fast (skip API calls), --limit (process N movies), --verbose flags
-- Idempotent DB loads, handles imdb_id UNIQUE collisions
-- Progress reporting and timings
-- FIX: when using --limit, ratings inserted are filtered to only valid movie_ids
+Key fixes / improvements vs original:
+- cache key includes movieId to avoid cross-title collisions
+- fast mode and rate-limit responses are NOT written into cache
+- more robust OMDb search fallback: prefer exact-title match from search results
+- released date parsing bug fixed (don't overwrite on except)
+- session closed on exit
+- periodic cache saves and final save
+- bulk/transactional insertion for ratings to speed up large datasets
+- safer casting of year and timestamp values
+- fewer per-row DB round-trips for ratings (use executemany in chunks)
+
+Usage: same as original.
 """
-
 import os
 import re
 import json
@@ -22,103 +25,137 @@ import requests
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
-from requests.exceptions import RequestException, Timeout, ConnectionError
 from dotenv import load_dotenv
 load_dotenv()
 
-
-
-# ==========================
-# CONFIG - change if needed
-# ==========================
+# CONFIG
 DB_URL = os.environ.get("DB_URL", "sqlite:///movies.db")
 OMDB_API_KEY = os.getenv("OMDB_API_KEY")
-OMDB_CACHE_FILE = "omdb_cache.json"
-MOVIES_CSV = "movies.csv"
-RATINGS_CSV = "ratings.csv"
+OMDB_CACHE_FILE = Path("omdb_cache.json")
+MOVIES_CSV = Path("movies.csv")
+RATINGS_CSV = Path("ratings.csv")
 SLEEP_BETWEEN_CALLS = 0.12
-# ==========================
+CACHE_SAVE_EVERY = 50
+RATINGS_CHUNK = 2000
 
 OMDB_RATE_LIMITED = False
 _session = requests.Session()
 
-def load_cache(path):
-    if Path(path).exists():
-        return json.loads(Path(path).read_text(encoding="utf8"))
+
+def load_cache(path: Path):
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf8"))
+        except Exception:
+            return {}
     return {}
 
-def save_cache(cache, path):
-    Path(path).write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf8")
+
+def save_cache(cache, path: Path):
+    try:
+        path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf8")
+    except Exception as e:
+        print(f"[cache] failed to write cache: {e}")
+
+
+def _normalize_year(year):
+    if year is None or (isinstance(year, float) and pd.isna(year)):
+        return None
+    try:
+        return int(float(year))
+    except Exception:
+        return None
+
 
 def parse_title_and_year(title):
     m = re.match(r"^(?P<title>.*)\s+\((?P<year>\d{4})\)$", str(title))
     if m:
-        return m.group("title").strip(), int(m.group("year"))
+        return m.group("title").strip(), _normalize_year(m.group("year"))
     return title, None
 
-def query_omdb(title, year=None, cache=None, fast=False):
+
+def _call_omdb(params, timeout=(3, 8)):
+    try:
+        r = _session.get("http://www.omdbapi.com/", params=params, timeout=timeout)
+        try:
+            return r.json()
+        except ValueError:
+            return {"Response": "False", "Error": f"HTTP {r.status_code}"}
+    except requests.RequestException as e:
+        return {"Response": "False", "Error": f"Network: {e}"}
+
+
+def _choose_best_search_result(title, results):
+    """Prefer exact (case-insensitive) title matches, else fall back to first result."""
+    if not results:
+        return None
+    t_norm = re.sub(r"\W+", "", title or "").lower()
+    for r in results:
+        rtitle = r.get("Title", "")
+        if re.sub(r"\W+", "", rtitle).lower() == t_norm:
+            return r
+    return results[0]
+
+
+def query_omdb(movie_id, title, year=None, cache=None, fast=False):
+    """Query OMDb. Cache key includes movie_id to avoid collisions.
+    - Do not write fast-mode or rate-limit sentinel into cache
+    - If cache hit: return cached
     """
-    Try:
-      1) t=title (+year optional)
-      2) if not found -> s=title (search) -> use first search result's imdbID to fetch full details (i=)
-    """
-    global OMDB_RATE_LIMITED, _session
+    global OMDB_RATE_LIMITED
     if cache is None:
         cache = {}
-    key = f"{title}||{year}"
+    key = f"{movie_id}||{title}||{year}"
     if key in cache:
         return cache[key]
-    if fast or OMDB_RATE_LIMITED:
-        cache[key] = {"Response": "False", "Error": "fast-mode or rate-limited: skipped"}
-        return cache[key]
+
+    if fast:
+        return {"Response": "False", "Error": "fast-mode: skipped"}
+
+    if OMDB_RATE_LIMITED:
+        return {"Response": "False", "Error": "rate-limited/invalid-key"}
+
     if not OMDB_API_KEY:
-        cache[key] = {"Response": "False", "Error": "No API key set"}
-        return cache[key]
+        return {"Response": "False", "Error": "No API key set"}
 
-    def _call(params):
-        try:
-            r = _session.get("http://www.omdbapi.com/", params=params, timeout=(3,6))
-            return r.json()
-        except Exception as e:
-            return {"Response": "False", "Error": str(e)}
-
-    # 1) try title search
+    # try exact title lookup first
     params = {"apikey": OMDB_API_KEY, "t": title}
     if year:
-        params["y"] = year
-    data = _call(params)
-    err = (data.get("Error") or "").lower()
+        params["y"] = str(year)
+    data = _call_omdb(params)
     if data.get("Response") == "True":
         cache[key] = data
         time.sleep(SLEEP_BETWEEN_CALLS)
         return data
 
-    # detect rate-limit / invalid-key
-    if "limit" in err or "invalid api key" in err:
+    # detect rate-limit / invalid key
+    err = (data.get("Error") or "").lower()
+    if "limit" in err or "invalid api key" in err or "rate limited" in err:
         OMDB_RATE_LIMITED = True
-        cache[key] = {"Response": "False", "Error": data.get("Error", "rate limited/invalid key")}
-        return cache[key]
+        # do NOT cache this sentinel under the key
+        print(f"[omdb] rate-limited/invalid key: {data.get('Error')}")
+        return {"Response": "False", "Error": data.get("Error")}
 
-    # 2) if not found, try a search (s=)
+    # fallback: search and try to pick best match
     search_params = {"apikey": OMDB_API_KEY, "s": title, "type": "movie"}
     if year:
-        search_params["y"] = year
-    search = _call(search_params)
+        search_params["y"] = str(year)
+    search = _call_omdb(search_params)
     if search.get("Response") == "True" and search.get("Search"):
-        first = search["Search"][0]
-        imdb = first.get("imdbID")
+        best = _choose_best_search_result(title, search.get("Search"))
+        imdb = best.get("imdbID") if best else None
         if imdb:
-            # fetch full details by id
-            detail = _call({"apikey": OMDB_API_KEY, "i": imdb})
+            detail = _call_omdb({"apikey": OMDB_API_KEY, "i": imdb})
             if detail.get("Response") == "True":
                 cache[key] = detail
                 time.sleep(SLEEP_BETWEEN_CALLS)
                 return detail
 
-    # fallback - store original failure
+    # final fallback: cache original failure (from initial t= call)
     cache[key] = data
     time.sleep(SLEEP_BETWEEN_CALLS)
     return data
+
 
 def clean_omdb_response(r):
     if not r or r.get("Response") == "False":
@@ -130,27 +167,28 @@ def clean_omdb_response(r):
     released = r.get("Released")
     runtime = r.get("Runtime")
     runtime_minutes = None
-    if runtime and "min" in runtime:
+    if runtime and "min" in str(runtime):
         try:
-            runtime_minutes = int(runtime.split()[0])
-        except:
+            runtime_minutes = int(str(runtime).split()[0])
+        except Exception:
             runtime_minutes = None
     released_date = None
     if released and released != "N/A":
-        for fmt in ("%d %b %Y", "%Y-%m-%d"):
+        for fmt in ("%d %b %Y", "%Y-%m-%d", "%d %B %Y"):
             try:
                 released_date = datetime.strptime(released, fmt).date().isoformat()
                 break
-            except:
-                released_date = None
+            except Exception:
+                continue
     return {
         "imdb_id": imdb_id,
         "director": director if director and director != "N/A" else None,
         "plot": plot if plot and plot != "N/A" else None,
         "box_office": box_office if box_office and box_office != "N/A" else None,
         "released": released_date,
-        "runtime_minutes": runtime_minutes
+        "runtime_minutes": runtime_minutes,
     }
+
 
 def print_progress(current, total, start_time, extra=""):
     elapsed = time.time() - start_time
@@ -158,10 +196,25 @@ def print_progress(current, total, start_time, extra=""):
     eta = (total - current) / rate if rate > 0 else float('inf')
     print(f"[{current}/{total}] elapsed={elapsed:.1f}s rate={rate:.2f} rows/s eta={eta:.1f}s {extra}")
 
+
+def _chunked_iterable(iterable, size):
+    it = iter(iterable)
+    while True:
+        chunk = []
+        try:
+            for _ in range(size):
+                chunk.append(next(it))
+        except StopIteration:
+            if chunk:
+                yield chunk
+            break
+        yield chunk
+
+
 def main(limit=None, fast=False, verbose=False):
     t0 = time.time()
     print("Starting ETL...", f"fast_mode={fast}", f"limit={limit}")
-    if not Path(MOVIES_CSV).exists() or not Path(RATINGS_CSV).exists():
+    if not MOVIES_CSV.exists() or not RATINGS_CSV.exists():
         raise FileNotFoundError("Place movies.csv and ratings.csv in the project folder before running.")
 
     cache = load_cache(OMDB_CACHE_FILE)
@@ -169,14 +222,13 @@ def main(limit=None, fast=False, verbose=False):
     ratings_df = pd.read_csv(RATINGS_CSV)
     print(f"Loaded CSVs: movies={len(movies_df)} ratings={len(ratings_df)} rows")
 
-    # apply limit (for testing) to movies only
     if limit:
         movies_df = movies_df.head(limit)
     total_movies = len(movies_df)
 
     engine = create_engine(DB_URL, future=True)
 
-    # Apply schema.sql safely (split into statements)
+    # apply schema if present
     schema_path = Path("schema.sql")
     if schema_path.exists():
         with engine.begin() as conn:
@@ -185,7 +237,7 @@ def main(limit=None, fast=False, verbose=False):
             for stmt in statements:
                 conn.exec_driver_sql(stmt)
 
-    # Insert / upsert movies and genres
+    # upsert movies + genres
     movie_start = time.time()
     with engine.begin() as conn:
         processed = 0
@@ -197,7 +249,7 @@ def main(limit=None, fast=False, verbose=False):
             genres_raw = row.get("genres", "")
             title, year = parse_title_and_year(raw_title)
 
-            omdb_raw = query_omdb(title, year=year, cache=cache, fast=fast)
+            omdb_raw = query_omdb(movie_id, title, year=year, cache=cache, fast=fast)
             omdb = clean_omdb_response(omdb_raw) if omdb_raw else None
 
             imdb_id = omdb.get("imdb_id") if omdb else None
@@ -224,7 +276,7 @@ def main(limit=None, fast=False, verbose=False):
             params = {
                 "id": movie_id,
                 "title": title,
-                "year": year,
+                "year": int(year) if year is not None else None,
                 "imdb_id": imdb_id,
                 "director": director,
                 "plot": plot,
@@ -236,6 +288,7 @@ def main(limit=None, fast=False, verbose=False):
             try:
                 conn.execute(upsert_sql, params)
             except IntegrityError as e:
+                # likely imdb_id unique collision; retry without imdb
                 msg = str(e).lower()
                 if "imdb_id" in msg or "unique constraint failed: movies.imdb_id" in msg:
                     params_no_imdb = params.copy()
@@ -263,35 +316,35 @@ def main(limit=None, fast=False, verbose=False):
                 res = conn.execute(text("SELECT id FROM genres WHERE name = :name"), {"name": g})
                 gid = res.scalar_one_or_none()
                 if gid:
-                    conn.execute(text("""
-                        INSERT OR IGNORE INTO movie_genres (movie_id, genre_id) VALUES (:movie_id, :genre_id)
-                    """), {"movie_id": movie_id, "genre_id": gid})
+                    conn.execute(text("INSERT OR IGNORE INTO movie_genres (movie_id, genre_id) VALUES (:movie_id, :genre_id)"),
+                                 {"movie_id": movie_id, "genre_id": gid})
 
             now = time.time()
             if verbose or (now - last_report >= 5) or (processed % 200 == 0) or processed == total_movies:
-                print_progress(processed, total_movies, movie_start, extra=f"title='{title[:30]}'")
+                print_progress(processed, total_movies, movie_start, extra=f"title='{str(title)[:30]}'")
                 last_report = now
 
+            if processed % CACHE_SAVE_EVERY == 0:
+                save_cache(cache, OMDB_CACHE_FILE)
+
+    # final cache save
     save_cache(cache, OMDB_CACHE_FILE)
     movie_time = time.time() - movie_start
     print(f"Movies processed: {total_movies} (took {movie_time:.2f}s)")
 
     # -------------------------
-    # Insert ratings (fixed)
+    # Insert ratings efficiently in chunks
     # -------------------------
     ratings_start = time.time()
 
-    # Build set of valid movie_ids: those already in DB plus those just processed
+    # find valid movie ids
     with engine.begin() as conn:
-        # get existing movie ids from DB
         res = conn.execute(text("SELECT id FROM movies"))
         existing_ids = {row[0] for row in res.fetchall()}
 
-    # Also include movieIds from the movies_df we processed in this run (in case DB was empty prior)
     processed_ids = set(movies_df["movieId"].astype(int).tolist())
     valid_movie_ids = existing_ids.union(processed_ids)
 
-    # Filter ratings to only those whose movieId is in valid_movie_ids
     original_ratings_count = len(ratings_df)
     ratings_df_filtered = ratings_df[ratings_df["movieId"].isin(valid_movie_ids)].copy()
     filtered_count = len(ratings_df_filtered)
@@ -299,27 +352,46 @@ def main(limit=None, fast=False, verbose=False):
     if dropped > 0:
         print(f"Filtered ratings: dropping {dropped} ratings that reference movies not present in DB (safe for --limit)")
 
-    # Insert filtered ratings
+    # prepare tuples for bulk insert
+    to_insert = []
+    for r in ratings_df_filtered.itertuples(index=False):
+        ts = None
+        if hasattr(r, 'timestamp') and not pd.isna(getattr(r, 'timestamp')):
+            try:
+                ts = int(getattr(r, 'timestamp'))
+            except Exception:
+                ts = None
+        to_insert.append({
+            "user_id": int(r.userId),
+            "movie_id": int(r.movieId),
+            "rating": float(r.rating),
+            "timestamp": ts
+        })
+
+    inserted = 0
+    insert_sql = text("""
+        INSERT OR IGNORE INTO ratings (user_id, movie_id, rating, timestamp)
+        VALUES (:user_id, :movie_id, :rating, :timestamp)
+    """)
+
     with engine.begin() as conn:
-        inserted = 0
-        for r in ratings_df_filtered.itertuples(index=False):
-            conn.execute(text("""
-                INSERT OR IGNORE INTO ratings (user_id, movie_id, rating, timestamp)
-                VALUES (:user_id, :movie_id, :rating, :timestamp)
-            """), {
-                "user_id": int(r.userId),
-                "movie_id": int(r.movieId),
-                "rating": float(r.rating),
-                "timestamp": int(r.timestamp) if hasattr(r, 'timestamp') and not pd.isna(r.timestamp) else None
-            })
-            inserted += 1
-            if verbose and inserted % 1000 == 0:
-                print(f"Inserted {inserted} ratings...")
+        for chunk in _chunked_iterable(to_insert, RATINGS_CHUNK):
+            conn.execute(insert_sql, chunk)
+            inserted += len(chunk)
+            if verbose:
+                print(f"Inserted ~{inserted} ratings...")
 
     ratings_time = time.time() - ratings_start
     total_time = time.time() - t0
-    print(f"Ratings inserted: {inserted} (took {ratings_time:.2f}s)")
+    print(f"Ratings inserted (attempted): {inserted} (took {ratings_time:.2f}s)")
     print(f"ETL finished. Total time: {total_time:.2f}s. DB at: {DB_URL}")
+
+    # cleanup
+    try:
+        _session.close()
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
